@@ -1,0 +1,17 @@
+# 凭证：绝对不要提交
+cookie.txt
+token.txt
+
+# 个人数据
+watch-state.json
+watch-state.tmp
+watch.lock
+skip.txt
+
+# 日志
+*.log
+
+# 运行环境
+.venv/
+__pycache__/
+*.pyc

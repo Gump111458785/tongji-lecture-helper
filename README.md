@@ -1,412 +1,103 @@
-# tjh.py 使用说明（Python 版）
-你是否还在为同济大学高等讲堂抢不到课而发愁，这个脚本会教会你如何快速自动化抢讲座。
-讲解一下这个 `tjh.py` 如何使用。
+# 同济高等讲堂 · 自动报名工具（Windows）
+
+> 本项目基于 [marshw666/tongji-high-education-lecture](https://github.com/marshw666/tongji-high-education-lecture)
+> 的 `tjh.py` 二次开发，补上了在 Windows 上长期挂机所需的全部能力。
+
+一个给同济大学「高等讲堂」用的命令行报名工具：用你自己的微信登录态调学校接口，
+可以查讲座、查资格、按报名开放时间卡点抢、以及盯着已报满的场次捡漏。
 
 ---
 
-## 1. 这是什么
+## 它解决什么问题
 
-一个命令行工具，用你浏览器里的登录态（cookie）调用同济高等讲堂的接口，可以：
+原版 `tjh.py` 已经能做单次卡点报名，但在 Windows 上长期挂着会遇到四个麻烦，这个项目
+都处理了：
 
-- 查身份、查资格
-- 列出讲座、看详情
-- **按报名开放时间卡点自动报名**
-- 取消报名
-
-不需要开浏览器，可以挂后台、写定时任务。
-
-**前提**：Python 3.8+，装了 `requests`。
-
-```bash
-python3 -V
-python3 -m pip install requests
-```
-
----
-
-## 2. 准备凭证
-
-这个站点**没有 `token` 请求头**，认证完全靠 `PG.ASP.Session.ID` 这个 cookie。所以要复制 cookie，不是 token。
-
-### 2.1 从浏览器复制
-
-1. Chrome 打开 `https://lecture.tongji.edu.cn/wxpage/index`，确认已登录（能看到讲座列表）
-2. F12 → **Network** → 筛选 `api/gj`
-3. 随便点一个请求 → **Headers** → **Request Headers**
-4. 找到 `Cookie:` 那一行，**整行复制**
-
-形如：
-
-```
-PG.ASP.Session.ID=30d77657-5bf0-427e-9672-6c579422b488; PG.ASP.WeiXinCode.ID=be0b112892ea40bea22dd31e7ae51139
-```
-
-> 两个 cookie 都要。只复制一个大概率 500。
-
-### 2.2 三种保存方式（选一种）
-
-**方式 A：环境变量**（推荐，当前终端有效）
-
-```bash
-export TJH_COOKIE='PG.ASP.Session.ID=...; PG.ASP.WeiXinCode.ID=...'
-```
-
-**方式 B：参数**（一次性）
-
-```bash
-python3 tjh.py --cookie 'PG.ASP.Session.ID=...; PG.ASP.WeiXinCode.ID=...' whoami
-```
-
-**方式 C：文件**（推荐，长期用）
-
-在 `tjh.py` 同目录建 `cookie.txt`，把整行粘进去：
-
-```bash
-echo 'PG.ASP.Session.ID=...; PG.ASP.WeiXinCode.ID=...' > cookie.txt
-python3 tjh.py whoami
-```
-
-脚本自动按 `--cookie` → `TJH_COOKIE` → `cookie.txt` 的顺序找。
-
-### 2.3 关于 token
-
-`--token` / `TJH_TOKEN` / `token.txt` 仍然保留，但**当前部署用不上**——浏览器里根本没有这个头。除非哪天学校改了鉴权方式。
-
-### 2.4 全局参数
-
-| 参数 | 说明 |
+| 问题 | 这里的做法 |
 | --- | --- |
-| `--cookie '...'` | 整串 cookie |
-| `--token '...'` | token（本站用不到） |
-| `--ua '...'` | 自定义 User-Agent，默认手机微信 UA |
-| `-v` / `--verbose` | 打印请求细节 |
+| 站点只支持微信网页授权，桌面浏览器 F12 拿不到 cookie | 直接从**电脑微信**的 Chromium cookie 库（DPAPI + AES-GCM）解密提取，一条命令完成 |
+| cookie 约 24 小时过期 | 自动检测微信库变化并续期，失效时安静等待而不是刷屏 |
+| 想盯着「已报满 → 有人退」的场次 | 轮询「有余位」列表，名额一放出立即提交，日志标 `捡漏命中` |
+| 高频轮询会被服务端限流 | 自适应降速：健康时 1 秒，连续失败自动降到 5 秒，30 分钟后试探提速 |
 
----
+## 功能
 
-## 3. 命令总览
+- **零浏览器**：不需要打开网页，后台直接调接口
+- **常驻守护**：注册成 Windows 计划任务，登录自启、崩溃 60 秒内自愈
+- **卡点报名**：按服务端时钟校准，开放前 0.4 秒开始提交
+- **捡漏**：已报满的讲座有人退，下一个轮询周期内就抢
+- **按级别过滤**：默认只抢院级（`--level 2`），校级可关掉
+- **黑名单**：`skip.txt` 里写 DataId，取消过的场次不会被抢回来
+- **事后复核**：报名成功后 10 分钟复验一次，发现被回滚会记下来（不会自动重抢）
+- **日志自管理**：超过 2MB 自动截断，被限流时指数退避
 
-```bash
-python3 tjh.py <命令> [参数]
+## 快速开始（Windows 10/11）
+
+```bat
+:: 1. 依赖（需要一个 Python 3.8+）
+setup.cmd
+
+:: 2. 取微信登录态（先在电脑微信里打开一次讲座页）
+powershell -ExecutionPolicy Bypass -File refresh-cookie.ps1
+
+:: 3. 确认能通
+tjh.cmd doctor
+tjh.cmd whoami
+tjh.cmd list --status 1
+
+:: 4. 挂起来
+watch.cmd
 ```
 
-| 命令 | 作用 |
-| --- | --- |
-| `doctor` | 自检：打印实际发出的请求头和响应，排查 500 |
-| `whoami` | 查当前登录身份 |
-| `check [DataId]` | 资格自检：能不能报名 |
-| `list` | 列出讲座 |
-| `detail <DataId>` | 看讲座详情（原始 JSON） |
-| `signup <DataId>` | 卡点报名 |
-| `cancel <DataId>` | 取消报名 |
+常驻运行（计划任务）：
 
----
-
-## 4. 命令详解
-
-### 4.1 `doctor` —— 连不上先跑这个
-
-```bash
-python3 tjh.py doctor
+```bat
+:: 以管理员身份运行一次
+schtasks /Create /TN TJLectureWatcher /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"%~dp0watch-loop.ps1\"" /SC ONLOGON /F
 ```
 
-输出：
+## 命令
 
-```
-=== 凭证 ===
-  token        : 未设置
-  cookie 数量  : 2
-    - PG.ASP.Session.ID = 30d77657-5bf...（36 字符）
-    - PG.ASP.WeiXinCode.ID = be0b112892e...（32 字符）
-  User-Agent   : Mozilla/5.0 (iPhone; ...) MicroMessenger/8.0.40
-  Authorization: Basic cTN4YXRwbTV0eHc0Mm...
+```bat
+tjh.cmd doctor                 :: 自检：凭证是否有效
+tjh.cmd whoami                 :: 姓名/学号/名单/人脸采集状态
+tjh.cmd list --status 1        :: 有余位的
+tjh.cmd list --status 3        :: 还没开放报名的
+tjh.cmd signup <DataId>        :: 卡点报名
+tjh.cmd cancel <DataId>        :: 取消报名
 
-=== 试请求 https://lecture.tongji.edu.cn/api/gj/studentwx/studentapi/StudentInfo ===
-  HTTP 200
-  实际发送的 Cookie: PG.ASP.Session.ID=...; PG.ASP.WeiXinCode.ID=...
-  实际发送的 token : (无)
-  响应体: {"state":"success","data":{"Name":"张三",...}}
-
-√ 认证成功，可以正常使用。
+watch.cmd                      :: 常驻守护
+watch.cmd --once --dry-run     :: 演练一轮，不提交
+watch.cmd --level 2 --poll 1   :: 只抢院级、1 秒轮询
 ```
 
-失败时会给具体原因（cookie 过期、漏了 cookie、UA 不匹配等）。
+## 关于 cookie
 
----
+站点的登录只能走微信网页授权，`PG.ASP.Session.ID` 就是你的登录凭证，**等价于账号密码**。
 
-### 4.2 `whoami` —— 查身份
-
-```bash
-python3 tjh.py whoami
-```
+本项目从电脑微信的本地 Chromium cookie 库读取它：
 
 ```
-姓名     : 张三
-学号     : 2131234
-学院     : 电子与信息工程学院
-专业     : 信息与通信工程
-培养层次 : 硕士研究生
-在可报名名单内 : True
-已完成人像采集 : True
+%APPDATA%\Tencent\xwechat\radium\web\profiles\*\Network\Cookies
 ```
 
-这两个布尔值决定你能不能报名，见下一节。
+读取时需要用当前 Windows 用户的 DPAPI 密钥解密（Chromium 的 AES-GCM 方案），
+提取结果只写到本机 `cookie.txt`，不会上传到任何地方。
 
----
+`cookie.txt`、`token.txt`、`watch-state.json`、`skip.txt`、日志都已在 `.gitignore` 里，
+不会被提交。
 
-### 4.3 `check` —— 资格自检
+## 免责声明
 
-```bash
-# 只查账号层面
-python3 tjh.py check
+- 这是**个人自用**工具。请只用自己的账号，不要代报、不要多开。
+- 自动化脚本通常不被学校的使用条款允许，使用风险自负：账号受限、报名被撤销等后果与作者无关。
+- 报名后请按时出勤。缺勤会记「未签到」，很多学校有次数限制。
+- 接口随时可能变更。报错先跑 `tjh.cmd doctor` 看原始响应。
 
-# 加上具体讲座
-python3 tjh.py check d1b331dcaff0843e8c980a9335e525ce
-```
+## 许可
 
-输出：
+`tjh.py` 及其相关逻辑来自上游项目，上游仓库**未声明开源许可证**（描述为
+"Personal use only"）。本仓库仅以个人学习与研究为目的做二次开发与整合，
+不主张对上游代码的任何额外授权。如需商用或再分发，请先联系原作者。
 
-```
-=== 资格自检 ===
-[✓] 登录态        张三 / 2131234
-[✓] 在可报名名单   是
-[✓] 人像采集       已完成
-[✓] 人脸校验接口   通过
-[ ] 讲座           人工智能与城市治理
-[·] 报名状态       3 未开始报名
-[ ] 报名开放       2026-11-06T12:00:00
-[✓] 是否已报名     未报名
-[⏳] 结论          未到开放时间（2026-11-06T12:00:00），可用 signup 卡点
-```
-
-符号含义：
-
-| 符号 | 含义 |
-| --- | --- |
-| `[✓]` | 通过 |
-| `[✗]` | 不通过，会拦住报名 |
-| `[!]` | 需要注意（已报过 / 查不到） |
-| `[⏳]` | 还没到时间，正常 |
-| `[·]` | 中性信息 |
-
-**报名的三个硬门槛**（任一为 ✗ 就别浪费时间抢）：
-
-1. 登录态有效
-2. `在可报名名单` = 是（名单由学院维护，脚本绕不过）
-3. `人像采集` / `人脸校验接口` = 通过（要去微信端或一体机采集）
-
----
-
-### 4.4 `list` —— 找讲座
-
-```bash
-python3 tjh.py list                       # 全部
-python3 tjh.py list --status 3            # 未开始报名
-python3 tjh.py list --status 1            # 有余位
-python3 tjh.py list --time 1 --level 1    # 当月 + 校级
-python3 tjh.py list --json                # 原始 JSON
-```
-
-输出：
-
-```
-DataId       状态           报名开放             讲座时间          标题
---------------------------------------------------------------------------------
-d1b331dca... 未开始报名     2026-11-06T12:00:00  2026-11-07 14:00  人工智能与城市治理
-a2c44f1b9... 有余位         2026-11-03T09:00:00  2026-11-04 19:00  碳中和与能源转型
-
-共 3 页，当前第 1 页
-```
-
-参数：
-
-| 参数 | 取值 |
-| --- | --- |
-| `--status` | `0` 全部 / `1` 有余位 / `2` 已报满 / `3` 未开始 / `4` 已结束 |
-| `--time` | `0` 全部 / `1` 当月 / `2` 往期 |
-| `--level` | `0` 全部 / `1` 校级 / `2` 院级 |
-| `--page` / `--page-size` | 分页，默认 1 / 20 |
-
-第一列 `DataId` 就是后面要用的 ID。
-
----
-
-### 4.5 `detail` —— 看详情
-
-```bash
-python3 tjh.py detail d1b331dcaff0843e8c980a9335e525ce
-```
-
-输出原始 JSON（字段很多），重点看：
-
-| 字段 | 含义 |
-| --- | --- |
-| `Cathedra` | 讲座标题 |
-| `LectureTimeStart` | 讲座开始时间 |
-| `TimeSigningUp` | **报名开放时间**（`signup` 按这个卡点） |
-| `LectureHallStatus` | 1 有余位 / 2 已满 / 3 未开始 / 4 已结束 |
-| `XSSigningUp` | 你已报名的时间，有值就别重复报 |
-| `Capacity` / `Venue` | 容量 / 地点 |
-
----
-
-### 4.6 `signup` —— 卡点报名
-
-```bash
-python3 tjh.py signup d1b331dcaff0843e8c980a9335e525ce
-```
-
-默认行为：读 `TimeSigningUp`，**提前 0.4 秒开始**，每秒尝试约 4 次，最多坚持 180 秒。
-
-输出：
-
-```
-讲座：人工智能与城市治理
-  DataId      : d1b331dcaff0843e8c980a9335e525ce
-  状态        : 3 未开始报名
-  讲座时间    : 2026-11-07T14:00:00
-  报名开放    : 2026-11-06T12:00:00
-  已报名时间  : 未报名
-  当前身份    : 张三 / 2131234
-  目标时刻    : 2026-11-06 12:00:00（服务端时钟）
-  等待 3521.4s ...
-[12:00:00.412] #1 未成功：报名尚未开始
-[12:00:00.688] #2 已受理，查询结果 ...
-√ 报名成功（服务端时间 2026-11-06T12:00:01）
-```
-
-参数：
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--at '2026-11-06 12:00:00'` | 用 `TimeSigningUp` | 手动指定开抢时刻（北京时间） |
-| `--now` | 关 | 不等待，立刻尝试一次（已开放的讲座用） |
-| `--lead 0.4` | `0.4` | 提前多少秒开始 |
-| `--patience 180` | `180` | 开抢后最多坚持多少秒 |
-| `--interval 0.25` | `0.25` | 每次尝试间隔秒数 |
-| `--dry-run` | 关 | 只做检查，不提交 |
-
-常见用法：
-
-```bash
-# 已经开放了，马上抢
-python3 tjh.py signup <DataId> --now
-
-# 手动指定时间（比如 TimeSigningUp 字段为空）
-python3 tjh.py signup <DataId> --at '2026-11-06 12:00:00'
-
-# 先演练，不真报
-python3 tjh.py signup <DataId> --dry-run
-
-# 抢不到就多坚持一会儿
-python3 tjh.py signup <DataId> --patience 300 --interval 0.2
-```
-
-**它是怎么抢的**（也是为什么成功率比手点高）：
-
-1. 用 HTTP `Date` 头校准服务端时钟，不依赖你电脑的时间
-2. 每次尝试前重新调 `SetCredentials` 现签一个报名凭证（`code` 有时效，不能复用）
-3. 用 `SginInLectureHallCredentials` 提交
-4. 提交后轮询 `GetSginInTime` 直到出结果（成功 / 失败）
-
-> 别把 `--interval` 调到 0.05 以下。服务端是异步队列，刷再快也不会更靠前，只会被 WAF 盯上。
-
----
-
-### 4.7 `cancel` —— 取消报名
-
-```bash
-python3 tjh.py cancel d1b331dcaff0843e8c980a9335e525ce
-```
-
-```
-√ 已取消报名
-```
-
-只能取消**还没开始**的讲座（开讲后取消不了，前端也是这么限制的）。
-
----
-
-## 5. 典型流程
-
-**第一次用：**
-
-```bash
-export TJH_COOKIE='PG.ASP.Session.ID=...; PG.ASP.WeiXinCode.ID=...'
-
-python3 tjh.py doctor        # 1. 确认 cookie 有效
-python3 tjh.py whoami        # 2. 看身份
-python3 tjh.py list --status 3   # 3. 找 DataId
-python3 tjh.py check <DataId>    # 4. 确认有资格
-python3 tjh.py signup <DataId>   # 5. 挂上等开抢
-```
-
-**抢完确认：**
-
-```bash
-python3 tjh.py check <DataId>    # 看"是否已报名"是否有时间
-```
-
-**脚本串联：**
-
-```bash
-ID=d1b331dcaff0843e8c980a9335e525ce
-python3 tjh.py check "$ID" && python3 tjh.py signup "$ID"
-```
-
----
-
-## 6. 退出码
-
-| 码 | 含义 | 典型场景 |
-| --- | --- | --- |
-| `0` | 成功 / 有资格 | 报名成功、`check` 通过 |
-| `1` | 失败 | 已满、已结束、超时未抢到 |
-| `2` | 参数或资格问题 | 不在名单、没人脸、DataId 不对 |
-| `3` | 凭证失效 | cookie 过期，重新复制 |
-
-`3` 是唯一需要你动手的：回浏览器重新复制 cookie。
-
----
-
-## 7. 排错
-
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| `× 缺少凭证` | 没设 cookie | `export TJH_COOKIE=...` 或建 `cookie.txt` |
-| `HTTP 500` + 空响应 | cookie 失效/不全 | 跑 `doctor`，重新复制整行 cookie |
-| `HTTP 404` | 接口下线（如 `SginInLectureHall`） | 正常现象，脚本已不走那条 |
-| `HTTP 200` + 空 body | 请求方法用错 | 不是成功，检查命令 |
-| `× 不在"高等讲堂可报名名单"内` | 名单没你 | 找学院教务加名单，脚本绕不过 |
-| `× 未完成人脸采集` | 没做人像采集 | 微信端/一体机采集一次 |
-| `× 名额已满` | 被抢光了 | 等别人取消，或换一场 |
-| `× 超时未成功` | 一直返回"未开始" | 检查系统时间/时区，或加大 `--patience` |
-| 中文乱码 | 终端编码 | `export PYTHONIOENCODING=utf-8` |
-
-排查顺序：`doctor` → `whoami` → `check` → `list` → `signup`。
-
----
-
-## 8. 定时任务（可选）
-
-`signup` 自己会等到开放时间，所以 cron 只要**提前几分钟**启动就行：
-
-```cron
-# 每天 11:55 跑一次，抢 12:00 开放的讲座
-55 11 * * * cd /path/to/tj-lecture && /usr/bin/python3 tjh.py signup 20261106001 >> signup.log 2>&1
-```
-
-注意：
-
-- cron 环境没有你 shell 里的 `TJH_COOKIE`，用 `cookie.txt` 文件方式最稳
-- cookie 会过期（几小时到几天不等），过期后 cron 会一直失败，需要手动更新
-- 日志里看 `√ 报名成功` / `×` 判断结果
-
----
-
-## 9. 安全提醒
-
-1. **cookie 等于你的账号密码**。`PG.ASP.Session.ID` 泄露 = 别人能替你报名、取消。别提交到 Git，别发群里。
-2. **只给自己用**。多账号代报属于违规，学校能通过学号 + IP + UA 查出来。
-3. **控制频率**。默认参数已经比人手快很多，别改成死循环。
-4. **别占坑**。报名了不去会被记"未签到"，很多学校有次数限制。
-5. 接口随时可能变，报错先跑 `doctor` 看原始响应。
+本仓库新增部分（`watch.py`、`refresh-cookie.ps1`、`tools/` 等）同样仅供个人使用。
