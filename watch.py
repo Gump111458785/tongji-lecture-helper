@@ -54,6 +54,7 @@ STATE_FILE = ROOT / "watch-state.json"
 LOG_FILE = ROOT / "watch.log"
 SKIP_FILE = ROOT / "skip.txt"
 COOKIE_FILE = ROOT / "cookie.txt"
+NEED_FLAG = ROOT / "NEED_COOKIE"
 LOG_MAX_BYTES = 2_000_000
 LOG_KEEP_LINES = 3000
 IS_WINDOWS = sys.platform == "win32"
@@ -559,6 +560,14 @@ def main(argv: list[str] | None = None) -> int:
             # 复核已报名的讲座，抓"当时成功、后来回滚"的假成功
             verify_registrations(api, state)
 
+            # 认证恢复正常就把"待更新"标记清掉，PC 端据此判断要不要推送
+            if NEED_FLAG.exists():
+                try:
+                    NEED_FLAG.unlink()
+                    log.info("cookie 已恢复，清除待更新标记")
+                except OSError:
+                    pass
+
             fail_streak = 0
             if not fast_mode and time.time() >= degraded_until:
                 fast_mode = True
@@ -582,6 +591,12 @@ def main(argv: list[str] | None = None) -> int:
             text = str(exc)
             if isinstance(exc, TokenExpired) or is_auth_error(text):
                 api = None
+                try:
+                    NEED_FLAG.write_text(
+                        datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8"
+                    )
+                except OSError:
+                    pass
                 sig = credential_signature()
                 db_changed = (not db_sig) or abs(sig - db_sig) >= 1
                 wait_s = min(300 * (2 ** min(refresh_fails, 3)), 2400)
