@@ -1,4 +1,4 @@
-# 同济高等讲堂 · 自动报名工具（Windows）
+# 同济高等讲堂 · 自动报名工具（Windows&&Linux）
 
 > 本项目基于 [marshw666/tongji-high-education-lecture](https://github.com/marshw666/tongji-high-education-lecture)
 > 的 `tjh.py` 二次开发，补上了在 Windows 上长期挂机所需的全部能力。
