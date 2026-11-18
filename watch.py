@@ -217,6 +217,9 @@ def grab(
             # status 8 / "已提交报名，等待结果"：服务端已有待定报名，别再重试
             if "已提交" in text or "'status': 8" in text:
                 return "pending", text
+            # status 9 / "已报名"：这场本来就报过了
+            if "'status': 9" in text or "已报名" in text:
+                return "registered", text
             if any(w in text for w in NOT_START_WORDS):
                 time.sleep(args.interval)
                 continue

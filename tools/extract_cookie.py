@@ -97,14 +97,29 @@ def main() -> int:
         print(f"[x] 没在微信数据库里找到 {HOST} 的 cookie，先在该页面登录一次")
         return 1
 
-    # last_access_utc 是 Chromium 时间（1601 起微秒），取最新的一条
-    latest = max(entries, key=lambda e: e[0])
-    con_name = latest[1]
-    value = decrypt_value(bytes.fromhex(latest[2]), key)
+    # 站点需要 PG.ASP.Session.ID 才认身份；WeiXinCode.ID 可能更新更晚，
+    # 所以不能简单取 last_access 最大的那条。
+    values: dict[str, str] = {}
+    for _last, name, enc_hex in sorted(entries, key=lambda e: -e[0]):
+        if name in values:
+            continue
+        try:
+            values[name] = decrypt_value(bytes.fromhex(enc_hex), key)
+        except Exception:
+            continue
 
-    outfile.write_text(f"{con_name}={value}", encoding="utf-8")
+    if "PG.ASP.Session.ID" not in values:
+        print(f"[x] 找到 cookie 里没有 PG.ASP.Session.ID（只有 {list(values)}），可能还没真正登录")
+        return 1
+
+    ordered = ["PG.ASP.Session.ID"] + [n for n in values if n != "PG.ASP.Session.ID"]
+    text = "; ".join(f"{n}={values[n]}" for n in ordered)
+    outfile.write_text(text, encoding="utf-8")
+
     print(f"[ok] 已写入 {outfile}")
-    print(f"     {con_name} = {value[:8]}...{value[-4:]}（{len(value)} 字符）")
+    for name in ordered:
+        value = values[name]
+        print(f"     {name} = {value[:8]}...{value[-4:]}（{len(value)} 字符）")
     return 0
 
 
