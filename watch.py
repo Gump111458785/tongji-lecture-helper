@@ -53,8 +53,10 @@ from tjh import (  # noqa: E402
 STATE_FILE = ROOT / "watch-state.json"
 LOG_FILE = ROOT / "watch.log"
 SKIP_FILE = ROOT / "skip.txt"
+COOKIE_FILE = ROOT / "cookie.txt"
 LOG_MAX_BYTES = 2_000_000
 LOG_KEEP_LINES = 3000
+IS_WINDOWS = sys.platform == "win32"
 
 TERMINAL = {"registered", "out_of_scope", "ended", "no_qualification", "cancelled"}
 SCOPE_WORDS = ("不在当前讲座报名范围内", "不在报名范围", "无报名资格", "不具备", "不在名单")
@@ -104,16 +106,25 @@ def save_state(state: dict) -> None:
 
 def acquire_single_instance():
     """文件锁保证只有一个实例（进程退出时锁自动释放）。"""
-    try:
-        import msvcrt
-    except ImportError:
-        return None
     fh = open(ROOT / "watch.lock", "a+")
-    try:
-        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        print("已有 watch.py 实例在运行，本次退出", file=sys.stderr)
-        raise SystemExit(0)
+    if IS_WINDOWS:
+        try:
+            import msvcrt
+        except ImportError:
+            return fh
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            print("已有 watch.py 实例在运行，本次退出", file=sys.stderr)
+            raise SystemExit(0)
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("已有 watch.py 实例在运行，本次退出", file=sys.stderr)
+            raise SystemExit(0)
     return fh
 
 
@@ -132,7 +143,11 @@ def make_api(args: argparse.Namespace) -> TjLecture:
     cookie = read_credential("cookie.txt", "TJH_COOKIE")
     if not token and not cookie:
         raise SystemExit("× 没有凭证：先跑 refresh-cookie.ps1 或填写 cookie.txt")
-    return TjLecture(token=token, cookie=cookie, ua=args.ua or "", verbose=args.verbose)
+    api = TjLecture(token=token, cookie=cookie, ua=args.ua or "", verbose=args.verbose)
+    # 双保险：即使环境里存在 HTTP(S)_PROXY，也强制直连
+    api.session.trust_env = False
+    api.session.proxies = {}
+    return api
 
 
 def fetch_all(
@@ -199,6 +214,9 @@ def grab(
             text = str(exc)
             if is_scope_error(text):
                 return "out_of_scope", text
+            # status 8 / "已提交报名，等待结果"：服务端已有待定报名，别再重试
+            if "已提交" in text or "'status': 8" in text:
+                return "pending", text
             if any(w in text for w in NOT_START_WORDS):
                 time.sleep(args.interval)
                 continue
@@ -329,7 +347,16 @@ def handle_row(api: TjLecture, row: dict, args: argparse.Namespace, state: dict)
     entry["at"] = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
     entry["last_try"] = time.time()
 
-    if result in ("registered",):
+    if result == "pending":
+        # 服务端说"已提交报名，等待结果"：视为已报名，等复核确认
+        entry["result"] = "registered"
+        entry.pop("last_try", None)
+        entry["verify_at"] = time.time() + args.verify_after
+        today = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        counters = state.setdefault("counters", {})
+        counters[today] = counters.get(today, 0) + 1
+        log.info("已提交（等待结果）：《%s》（%s）", title, detail[:120])
+    elif result in ("registered",):
         entry["result"] = "registered"
         entry.pop("last_try", None)
         entry["verify_at"] = time.time() + args.verify_after
@@ -373,6 +400,16 @@ def cookie_db_signature() -> float:
     return latest
 
 
+def credential_signature() -> float:
+    """Windows 看微信 cookie 库，Linux 看 cookie.txt 的修改时间。"""
+    if IS_WINDOWS:
+        return cookie_db_signature()
+    try:
+        return COOKIE_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def verify_registrations(api: TjLecture, state: dict) -> None:
     """报名成功后隔一段时间复核，抓"当时成功、后来被回滚"的假成功。"""
     now = time.time()
@@ -392,21 +429,26 @@ def verify_registrations(api: TjLecture, state: dict) -> None:
             rec["verify_at"] = time.time() + 600
             changed = True
             continue
-        if result.get("state") == 1:
+        st = result.get("state")
+        if st == 1:
             log.info("复核通过：《%s》仍有效（报名时间 %s）", rec.get("title"), result.get("signUpTime"))
-        else:
+        elif st == -1:
             # 可能是你手动取消的；只记录，绝不重新抢回来
             log.warning(
                 "《%s》已不在报名状态（state=%s），记为已取消，不再重抢",
-                rec.get("title"), result.get("state"),
+                rec.get("title"), st,
             )
             rec["result"] = "cancelled"
-            rec["detail"] = f"复核 state={result.get('state')}"
+            rec["detail"] = f"复核 state={st}"
             rec.pop("last_try", None)
             today = datetime.now(CN_TZ).strftime("%Y-%m-%d")
             counters = state.setdefault("counters", {})
             if counters.get(today, 0) > 0:
                 counters[today] -= 1
+        else:
+            # 服务端还在处理（如 state=0），别急着判死，过 10 分钟再查
+            log.info("《%s》仍在处理中（state=%s），10 分钟后再复核", rec.get("title"), st)
+            rec["verify_at"] = time.time() + 600
         changed = True
     if changed:
         save_state(state)
@@ -456,6 +498,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
+    # 强制直连：隧道/反串常会往环境里塞代理变量，这里全部清掉，
+    # 保证本进程和它拉起的子进程都只走直连
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        os.environ.pop(var, None)
+
     setup_logging()
     _lock = acquire_single_instance()
     state = load_state()
@@ -479,6 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         "守护启动：poll=%.0fs(慢档%.0fs) slow-poll=%.0fs arm=%.0fs dry-run=%s",
         args.poll, args.poll_slow, args.slow_poll, args.arm, args.dry_run,
     )
+    log.info("直连模式：已清除代理环境变量，trust_env=False")
 
     while True:
         cycle_start = time.time()
@@ -530,9 +579,25 @@ def main(argv: list[str] | None = None) -> int:
             text = str(exc)
             if isinstance(exc, TokenExpired) or is_auth_error(text):
                 api = None
-                sig = cookie_db_signature()
+                sig = credential_signature()
                 db_changed = (not db_sig) or abs(sig - db_sig) >= 1
                 wait_s = min(300 * (2 ** min(refresh_fails, 3)), 2400)
+
+                if not IS_WINDOWS:
+                    # 服务器上没有微信：等外面把新的 cookie.txt 传上来
+                    if not db_changed:
+                        log.info(
+                            "登录态失效，等待更新 cookie.txt（每 %d 分钟检查一次）",
+                            wait_s // 60,
+                        )
+                        time.sleep(wait_s)
+                        continue
+                    db_sig = sig
+                    refresh_fails = 0
+                    fail_streak = 0
+                    log.info("检测到 cookie.txt 已更新，重新加载")
+                    continue
+
                 if not db_changed:
                     # 微信库没动说明你还没重新登录，安静等着，不刷屏
                     log.info(

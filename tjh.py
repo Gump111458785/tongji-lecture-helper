@@ -123,6 +123,10 @@ class TjLecture:
         self.verbose = verbose
         self.offset = 0.0  # 服务端时间 - 本地时间
         self.session = requests.Session()
+        # 永远直连：忽略 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 等环境变量，
+        # 也忽略系统代理，避免隧道/反串把校园网请求带偏
+        self.session.trust_env = False
+        self.session.proxies = {}
         self.session.headers.update(
             {
                 "User-Agent": UA,
