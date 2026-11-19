@@ -16,8 +16,12 @@ function Log([string]$msg) {
     } catch { }
 }
 
+# SSH 选项：连不上时快速失败，连接假死后由 ServerAlive 在 ~10 秒内断开，
+# 避免像 2026-11-19 16:59 那样 ssh 卡死 5 分钟、把下一次推送也堵住
+$sshOpt = @('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2')
+
 Log '[*] 0/2 检查服务器是否需要新 cookie ...'
-$probe = ssh -o BatchMode=yes -o ConnectTimeout=10 -p $port $remote "test -f $flag && echo NEED || echo OK" 2>&1
+$probe = & ssh @sshOpt -p $port $remote "test -f $flag && echo NEED || echo OK" 2>&1
 if (-not $Force -and ($probe -notmatch 'NEED')) {
     Log '[=] 服务器 cookie 正常，跳过（-Force 可强制推送）'
     exit 0
@@ -32,7 +36,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Log '[*] 2/2 推送到服务器 ...'
-scp -o BatchMode=yes -P $port (Join-Path $here 'cookie.txt') "${remote}:/ics2/tj-lecture/cookie.txt"
+& scp @sshOpt -P $port (Join-Path $here 'cookie.txt') "${remote}:/ics2/tj-lecture/cookie.txt"
 if ($LASTEXITCODE -ne 0) {
     Log '[x] 推送失败：检查 SSH 是否可连'
     exit 1
