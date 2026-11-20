@@ -34,7 +34,11 @@ function Invoke-Cmd {
     }
     Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
     $code = -1
-    if ($done) { $code = $proc.ExitCode }
+    if ($done) {
+        # Start-Process -PassThru 的对象在 WaitForExit 后 ExitCode 可能还是空，必须 Refresh
+        try { $proc.Refresh() } catch { }
+        if ($null -ne $proc.ExitCode) { $code = $proc.ExitCode } else { $code = 0 }
+    }
     return [pscustomobject]@{ Done = $done; ExitCode = $code; Text = $text }
 }
 
